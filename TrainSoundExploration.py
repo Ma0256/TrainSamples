@@ -1,4 +1,5 @@
-# plot time and frequency from files in dir 'Fehlerübersicht', according to notebook 'Masterthesis'
+# plot time and frequency from files in data dir 'Fehlerübersicht', according to notebook 'Masterthesis'
+# this file expects the data dir as working dir
 import pandas as pd
 import io
 # import IPython.display as ipd
@@ -56,10 +57,8 @@ def plot_normal_prominent(normal, prominent, samplerate=1, axs=None, showcolorba
 
 
 demo_dir = str(prj_root) + r'\Fehlerübersicht'
-dfNormal = None
-dfAuffaellig = None
 
-## select data
+# the data
 data = {
     "Bogengeräusche": dict(
         normal=r'.\Bogengeräusche\N81_602HS_002_2016-10-15_20-06-17_01.ZS.txt',

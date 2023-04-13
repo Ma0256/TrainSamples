@@ -6,6 +6,8 @@ import torchaudio
 from librosa import power_to_db
 from pathlib import Path
 from tqdm import tqdm
+from typing import Dict
+
 from convert_labels import acr_dir
 from TrainSamples import plot_spectrogram
 from sklearn.model_selection import train_test_split
@@ -18,7 +20,9 @@ from functools import partial
 
 # for test code
 from sklearn.metrics import classification_report, confusion_matrix
-#from sklearn.metrics.cluster import contingency_matrix
+
+
+# from sklearn.metrics.cluster import contingency_matrix
 
 
 def unchain(x, ls):
@@ -246,9 +250,8 @@ def machine_label_dataset(X_db, fs):
 
 
 # convert slice to file label
-def conv_slice2file(y):
-    yf = []
-    for v in y:
+def conv_slice2file(y, split_sizes=None):
+    def f(v):
         v = tuple(sorted(set(v)))
         l = 0
         if v[0] == 0:
@@ -258,13 +261,19 @@ def conv_slice2file(y):
         elif len(v) > 1:
             m = {(1, 2): 3}
             l = m[v]
-        yf.append(l)
-    return yf
+        return l
+
+    if split_sizes:
+        y = unchain(y, ls=split_sizes)
+    if hasattr(y[0], "__len__"):
+        return list(map(f, y))
+    else:
+        return f(y)
 
 
 # wraps classification_report. 'names' is interpreted differently from sklearn 'target_names'. 'names' index must
 # correspond to labels in 'y_pred', 'y_true' - different to sklearn classification_report.
-def file_classification_report(y_true, y_pred, labels=None, names=None, output_dataframe=False, **kwargs):
+def file_classification_report(y_true, y_pred, labels=None, names=None, as_dataframe=False, **kwargs):
     if labels is None:
         labels = unique_labels(y_true, y_pred)
     # select used target_names from labels
@@ -280,7 +289,7 @@ def file_classification_report(y_true, y_pred, labels=None, names=None, output_d
         # zero division will occur, disable the warning
         kwargs['zero_division'] = 0
 
-    if output_dataframe:
+    if as_dataframe:
         cr = classification_report(y_true, y_pred=y_pred, labels=labels, target_names=target_names,
                                    output_dict=True, **kwargs)
         # harmonize data for columns
@@ -289,15 +298,18 @@ def file_classification_report(y_true, y_pred, labels=None, names=None, output_d
                 "f1-score": cr["accuracy"],
                 "support": cr["macro avg"]["support"],
             }
-        cr = pd.DataFrame(cr).T.convert_dtypes()
+        # reindex rows, since 'accuracy' would otherwise be the last row
+        cr = pd.DataFrame.from_dict(cr, orient="index").loc[list(cr)]
+        #can infer ints if score in {0, 1} cr = pd.DataFrame(cr).T.convert_dtypes()
     else:
         cr = classification_report(y_true, y_pred=y_pred, labels=labels, target_names=target_names, **kwargs)
     return cr
 
 
 # wraps file classification_report for ragged sequence of labels
-def slice_classification_report(y_true, y_pred, labels=None, names=None, output_dataframe=False, **kwargs):
-    #if hasattr(y_true, "__len__") and hasattr(y_pred, "__len__"):
+# return 2 CR's, for flat and aggregated labels.
+def slice_classification_report(y_true, y_pred, labels=None, names=None, as_dataframe=False, **kwargs):
+    # if hasattr(y_true, "__len__") and hasattr(y_pred, "__len__"):
     # file level comparison
     if [len(v) for v in y_true] != [len(v) for v in y_pred]:
         raise ValueError("'y_true' item lengths different to 'y_pred'")
@@ -306,13 +318,43 @@ def slice_classification_report(y_true, y_pred, labels=None, names=None, output_
              slice=[np.array([*chain(*v)]) for k, v in d.items()])
 
     for k, (y_true, y_pred) in d.items():
-        d[k] = file_classification_report(y_true, y_pred, labels=labels, names=names, output_dataframe=output_dataframe,
+        d[k] = file_classification_report(y_true, y_pred, labels=labels, names=names, as_dataframe=as_dataframe,
                                           **kwargs)
     return d
 
 
+# classification report with optional aggregation and dataframe conversion
+# return CR or 2 CR's for aggregation
+def agg_classification_report(y_true, y_pred, aggregate: Dict[str, callable] = None, labels=None, names=None, as_dataframe=False,
+                              **kwargs):
+    if aggregate is None:
+        aggregate = lambda x: x
+    if hasattr(aggregate, "__len__"):
+        cr = {}
+        for k, f in (aggregate.items() if hasattr(aggregate, "items") else enumerate(aggregate)):
+            cr[k] = file_classification_report(f(y_true), y_pred=f(y_pred),
+                                               labels=labels, names=names, as_dataframe=as_dataframe, **kwargs)
+        if as_dataframe:
+            cr = pd.concat(cr)
+    else:
+        cr = file_classification_report(aggregate(y_true), y_pred=aggregate(y_pred),
+                                        labels=labels, names=names, as_dataframe=as_dataframe, **kwargs)
+    return cr
+    #     try:
+    #         labels = [np.array([*chain(*v)]) for v in ys]
+    #     except TypeError as e:
+    #         msg = f"{e}, cannot aggregate 1d labels. Either pass (ragged) 2d sequence or use 'split_sizes'."
+    #         raise TypeError(msg)
+    #     labels = labels, [np.array(aggregate(v)) for v in ys]
+    #     crs = [file_classification_report(*v, labels=labels, names=names, as_dataframe=as_dataframe, **kwargs)
+    #            for v in labels]
+    # else:
+    #     labels = [ys]
+    # return
+
+
 def confusion_matrix_df(y_pred, y_true, names=None):
-    #cm = (pd.crosstab(pd.Series(names[y_true]), names[y_pred]))
+    # cm = (pd.crosstab(pd.Series(names[y_true]), names[y_pred]))
     cm = confusion_matrix(y_true, y_pred)
     labels = unique_labels(y_true, y_pred)
     if names is None:
@@ -474,10 +516,10 @@ def load_acramos_slices(subset=None, n=None, reindex=False, label_report=False, 
             return unchain(yr, ls)
 
         # include negatives
-        #target_names = list({**dict.fromkeys(ds["target_names"][:1]), **dict.fromkeys(subset)})
+        # target_names = list({**dict.fromkeys(ds["target_names"][:1]), **dict.fromkeys(subset)})
         c = np.unique([*chain(*chain(y, y_auto))])
         y = mapr(list(c).index, y)
-        #y_auto = reindex(y_auto)
+        # y_auto = reindex(y_auto)
         y_auto = mapr(list(c).index, y_auto)
         # negative class needed for slice level operation
         ds["target_names"] = [ds["target_names"][k] for k in c]
@@ -485,7 +527,7 @@ def load_acramos_slices(subset=None, n=None, reindex=False, label_report=False, 
     # ds.pop('y')
     ds['X'] = X_db
     ds['y'] = y_auto
-    ds['y_file'] = conv_slice2file(y_auto)#[sorted(set(v))[-1] for v in y_auto]
+    ds['y_file'] = conv_slice2file(y_auto)  # [sorted(set(v))[-1] for v in y_auto]
     ds["files"] = files
     # the acramos file label from the database
     ds['y_acramos'] = [v[0] for v in y]
@@ -493,7 +535,7 @@ def load_acramos_slices(subset=None, n=None, reindex=False, label_report=False, 
     return ds
 
 
-def train_test_split_acramos(ds, test_size=0.2, random_state=42):
+def train_test_split_dataset(ds, test_size=0.2, random_state=42):
     # n = max([len(v) if hasattr(v, "__len__") else 1 for v in ds.values()])
     n = len(ds['X'])
     data_items = {k: v for k, v in ds.items() if hasattr(v, "__len__") and len(v) == n}
@@ -507,6 +549,7 @@ def train_test_split_acramos(ds, test_size=0.2, random_state=42):
     return {**train, **other_items}, {**test, **other_items}
 
 
+# convert arbitrary dict of datasets (must contain keys 'y', and 'target_names') to dataframe
 def prevalence(ds: dict, margin=False):
     if hasattr(list(ds.values())[0]['y'][0], "__len__"):
         rs = [pd.Series(np.bincount(conv_slice2file(d['y']), minlength=len(d['target_names'])), index=d['target_names'])
@@ -521,7 +564,8 @@ def prevalence(ds: dict, margin=False):
         prev = dict(file=pd.DataFrame(rs, index=list(ds)))
 
     if margin:
-        prev = {k: v.append(v.agg(["sum"])) for k, v in prev.items()}
+        if len(ds) > 1:
+            prev = {k: v.append(v.agg(["sum"])) for k, v in prev.items()}
         prev = pd.concat(prev, axis=0).T
         prev = prev.append(prev.agg(["sum"]))
     else:
@@ -551,23 +595,23 @@ if __name__ == "__main__":
     # ##################################################################################################################
     # ##################################################################################################################
     # use uniform subset
-    #subset = ["[Negativ]", "[Quietschen]"]
+    # subset = ["[Negativ]", "[Quietschen]"]
     subset = ["[Kreischen]", "[Quietschen]"]
     # classes = [label.index("[Kreischen]"), label.index("[Quietschen]"), label.index("[Kreischen][Quietschen]")]
     # classes = [label.index("[Kreischen]"), label.index("[Kreischen][Quietschen]")]
     # classes = [label.index("[Kreischen][Quietschen]")]
     reindex = False
-    ds = load_acramos_slices(subset=subset, #n=100,
+    ds = load_acramos_slices(subset=subset,  # n=100,
                              reindex=reindex, label_report=True,
                              dir=acr_dir, split=1.0, aggregate=lambda x: x, spectral_pool=0,
                              # feat_cache="clustering")
                              feat_cache=Path(__file__).stem)
-    labels = np.unique([*chain(*ds['y'])])
+    # labels = np.unique([*chain(*ds['y'])])
     names = np.array(ds['target_names'])
 
     print("")
     print("Train holdout split")
-    ds_trn, ds_ho = train_test_split_acramos(ds)
+    ds_trn, ds_ho = train_test_split_dataset(ds)
 
     # flatten nested files
     X, y = [[*chain(*ds_trn[k])] for k in ['X', 'y']]
@@ -575,13 +619,15 @@ if __name__ == "__main__":
 
     # build DataFrame for display
     prev = prevalence(dict(train=ds_trn, holdout=ds_ho), margin=True)
+    # prev = prev.rename(columns=dict(file="slice"))
+    # prev.columns = [('slice', b) for a, b in prev.columns]
     print(prev.to_string(col_space=([*[7] * (len(prev.columns) // 2), 15] * 2)[:len(prev.columns)]))
 
     print()
     print("Train on slices")
     # fit model on train data
     mdl = LinearDiscriminantAnalysis()
-    #mdl = RandomForestClassifier()
+    # mdl = RandomForestClassifier()
     print(str(mdl))
     mdl.fit(X, y)
     yh = mdl.predict(X_ho)
@@ -589,20 +635,21 @@ if __name__ == "__main__":
     yh = unchain(yh, ls=[len(v) for v in ds_ho['y']])
     print("Holdout test")
     if True:
-        cr = slice_classification_report(ds_ho['y'], y_pred=yh, names=names, output_dataframe=True)
+        cr = slice_classification_report(ds_ho['y'], y_pred=yh, names=names, as_dataframe=True)
         cr = pd.concat(cr, axis=1)
         print(cr.to_string(col_space=[9, 9, 9, 9, 20, 9, 9, 9], float_format='{:0.2f}'.format).replace("<NA>", "    "))
         print()
     else:
+        # don't use dataframe
         cr = slice_classification_report(ds_ho['y'], y_pred=yh, names=names)
         [(print(f"{k} level"), print(v)) for k, v in cr.items()]
-    er = slice_error_report(ds_ho['y'], y_pred=yh,)
+    er = slice_error_report(ds_ho['y'], y_pred=yh, )
 
     print("Holdout test against file level original acramos label")
     # -not- the ground truth used for training
-    cr = file_classification_report(ds_ho['y_acramos'], y_pred=conv_slice2file(yh), names=names, output_dataframe=True)
+    cr = file_classification_report(ds_ho['y_acramos'], y_pred=conv_slice2file(yh), names=names, as_dataframe=True)
     # "display.precision", 2
-    #with pd.option_context('display.float_format', '{:0.2f}'.format):
+    # with pd.option_context('display.float_format', '{:0.2f}'.format):
     print(cr.to_string(col_space=9, float_format='{:0.2f}'.format).replace("<NA>", "    "))
     print()
 
@@ -615,7 +662,7 @@ if __name__ == "__main__":
 
     # fit model on train data
     mdl = LinearDiscriminantAnalysis()
-    #mdl = RandomForestClassifier()
+    # mdl = RandomForestClassifier()
     print(str(mdl))
     mdl.fit(X, y)
     yh = mdl.predict(X_ho)

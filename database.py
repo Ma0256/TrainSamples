@@ -1,5 +1,6 @@
-# connect to database and export excel
+# connect to database and export excel/CSV
 import json
+# need package mysql -connector
 #import mysql.connector
 #import pyodbc
 import sqlalchemy as sa
@@ -11,6 +12,7 @@ import matplotlib.pyplot as plt
 from TrainSamples import sample_dir
 
 
+# return URL for local file data base
 def get_acramos2VD_url():
     # MS access connector for "Sampledateien"
     access_db = rf"{sample_dir}\acramos2VD.mdb"
@@ -27,7 +29,7 @@ def get_acramos2VD_url():
     return url
 
 
-# connect to acramos MariaDB10
+# connect to acramos MariaDB10 on NAS
 def get_acrDb_url():
     # SQL access
     # Credentials were set up as a dictionary.
@@ -49,14 +51,47 @@ def get_acrDb_url():
 
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':
+    to_excel = False
+
     # open MS access database "Sampledateien"
-    connection_url = get_acrDb_url()
+    #connection_url = get_acrDb_url()
+
+    # create mariadb (it is a mysql fork) database server in terminal and read SQL dump file:
+    # mariadb -u root -p -e"CREATE DATABASE acrdb"
+    # mariadb acrdb -u root -p < acrDb_15-05-23.sql
+    # connect to server via mariadb connector (from pip)
+    connection_url = 'mariadb+mariadbconnector://root:adsim@localhost/acrDb'
+    # connect to server via mysql connector
+    #connection_url = 'mariadb+mysqlconnector://root:adsim@localhost/acrDb'
+    #
     #connection_url = get_acramos2VD_url()
+
     engine = sa.create_engine(connection_url)
-    print(engine.table_names())
-    table_name = 'TabZug'
-    print(f"Reading SQL table {table_name} ...")
-    df = pd.read_sql_table(table_name, engine)
-    print(f"Writing Excel file {table_name} ...")
-    df.to_excel(f"{table_name}.xlsx", index=False)
-    print(df)
+    metadata = sa.MetaData(bind=engine)
+    #sa.MetaData.reflect(metadata)
+    #some_table = sa.Table("tabmess", metadata, autoload_with=engine)
+    #cols = some_table.c.keys()
+    insp = sa.inspect(engine)
+    tabs = insp.get_table_names()
+    tabs = {k: (list(engine.execute(f'SELECT COUNT(*) FROM {k};'))[0][0], len(insp.get_columns(k))) for k in tabs}
+    tabs = pd.DataFrame.from_dict(tabs, orient='index')
+    print(tabs)
+    table_name = 'tabzug'
+    # iterate over index
+    #df = pd.read_excel("tabzug.xlsx")
+    for table_name in set(tabs.T) - {'tabzugax'}:
+        rows = tabs.loc[table_name, 0]
+        if rows:
+            print(f"Reading SQL table {table_name} ...")
+            df = pd.read_sql_table(table_name, engine)
+            print(f"... to dataframe shape {df.shape}")
+            if to_excel:
+                # EXCEL is slower in writing and much slower in reading
+                print(f"Writing Excel file {table_name} in {Path.cwd()} ...")
+                df.to_excel(f"{table_name}.xlsx", index=False)
+            else:
+                print(f"Writing CSV file {table_name} in {Path.cwd()} ...")
+                df.to_csv(f"{table_name}.csv", index=False,
+                          sep=';', decimal=',')
+            print(df)
+

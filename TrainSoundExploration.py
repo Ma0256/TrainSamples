@@ -9,11 +9,13 @@ import matplotlib
 import numpy as np
 import scipy
 from scipy.io import wavfile
+from pathlib import Path
 
-from TrainSamples import prj_root
+# data dir for this project
+demo_dir = Path.home() / "prj" / 'Fehlerübersicht'
 
 
-def plot_normal_prominent(normal, prominent, samplerate=1, axs=None, showcolorbar=True):
+def plot_normal_prominent(normal, prominent, samplerate=1, axs=None, showcolorbar=True, cmap='jet', **kwargs):
     if not len(normal) == len(prominent):
         # raise ValueError
         pass
@@ -34,10 +36,10 @@ def plot_normal_prominent(normal, prominent, samplerate=1, axs=None, showcolorba
         # ax.set_title("spectrogram")
         ax.set_xlabel("time [s]")
         # ax.set_ylabel("frequency [Hz]")
-        # default mode plots PSD with NFFT=256
+        # default NFFT=256 stride 128
         pxx, freq, t, im = ax.specgram(x / 0.00002, Fs=samplerate, scale='dB', mode='magnitude', vmin=20.0,
                                        vmax=100.0,
-                                       cmap='jet')
+                                       cmap=cmap, **kwargs)
         ax.set_ylim(50, 10000)
 
     axs[0, 0].set_title("normal")
@@ -56,13 +58,11 @@ def plot_normal_prominent(normal, prominent, samplerate=1, axs=None, showcolorba
     return
 
 
-demo_dir = str(prj_root) + r'\Fehlerübersicht'
-
 # the data
-data = {
+examples = {
     "Bogengeräusche": dict(
-        normal=r'.\Bogengeräusche\N81_602HS_002_2016-10-15_20-06-17_01.ZS.txt',
-        auffaellig=r'.\Bogengeräusche\N81_602HS_002_2016-10-21_17-14-47_01.ZS.txt',
+        normal=r'.\Bogengeräusche\N81_602HS_002_2016-10-15_20-06-17_01.ZS.wav',
+        auffaellig=r'.\Bogengeräusche\N81_602HS_002_2016-10-21_17-14-47_01.ZS.wav',
     ),
     "Flachstellen Variante Güterzug": dict(
         normal=r'.\Flachstellen\2015-05-26_03-05-08_01.ZS.txt.wav',
@@ -90,25 +90,30 @@ data = {
     ),
 }
 
-# to list
-items = [{**dict(title=k), **v} for k, v in data.items()]
+if __name__ == "__main__":
 
-# select which to plot
-items = [items[0]]
-# read and plot them
-for item in items:
-    sel = item["title"]
-    if item["normal"].endswith("wav"):
-        samplerate, dataNormal = wavfile.read(item["normal"])
-        samplerate, dataAuffaellig = wavfile.read(item["auffaellig"])
-    else:
-        samplerate = 51200
-        colnames = ['time', 'pressure']
-        dataNormal = pd.read_csv(item["normal"], sep="\t", names=colnames, header=None, decimal=",")["pressure"]
-        dataAuffaellig = pd.read_csv(item["normal"], sep="\t", names=colnames, header=None, decimal=",")["pressure"]
+    # to list
+    items = [{**dict(title=k), **v} for k, v in examples.items()]
 
-    plot_normal_prominent(normal=dataNormal, prominent=dataAuffaellig, samplerate=samplerate)
-    plt.suptitle(sel)  # , fontsize=32)
+    # select which to plot
+    items = items[:2]
+    # read and plot them
+    for item in items:
+        sel = item["title"]
+        dataNormal = demo_dir / item["normal"]
+        dataAuffaellig = demo_dir / item["auffaellig"]
+        if item["normal"].endswith("wav"):
+            samplerate, dataNormal = wavfile.read(dataNormal)
+            samplerate, dataAuffaellig = wavfile.read(dataAuffaellig)
+        else:
+            samplerate = 51200
+            colnames = ['time', 'pressure']
+            dataNormal = pd.read_csv(dataNormal, sep="\t", names=colnames, header=None, decimal=",")["pressure"]
+            dataAuffaellig = pd.read_csv(dataAuffaellig, sep="\t", names=colnames, header=None, decimal=",")["pressure"]
 
-plt.show()
-print("done")
+        plot_normal_prominent(normal=dataNormal, prominent=dataAuffaellig, samplerate=samplerate,
+                              NFFT=1024, noverlap=512)
+        plt.suptitle(sel)  # , fontsize=32)
+
+    plt.show()
+    print("done")

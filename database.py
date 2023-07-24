@@ -79,17 +79,18 @@ if __name__ == '__main__':
     table_name = 'tabzug'
     # iterate over index
     #df = pd.read_excel("tabzug.xlsx")
-    for table_name in set(tabs.T) - {'tabzugax'}:
+    for table_name in set(tabs.T):# - {'tabzugax'}:
         rows = tabs.loc[table_name, 0]
         if rows:
             print(f"Reading SQL table {table_name} ...")
             df = pd.read_sql_table(table_name, engine)
             print(f"... to dataframe shape {df.shape}")
             if to_excel:
-                # EXCEL is slower in writing and much slower in reading
+                # EXCEL is slower in writing and (surprisingly) much slower in reading
                 print(f"Writing Excel file {table_name} in {Path.cwd()} ...")
                 df.to_excel(f"{table_name}.xlsx", index=False)
             else:
+                # CSV is much faster to read
                 print(f"Writing CSV file {table_name} in {Path.cwd()} ...")
                 df.to_csv(f"{table_name}.csv", index=False,
                           sep=';', decimal=',')

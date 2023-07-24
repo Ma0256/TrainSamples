@@ -1,17 +1,19 @@
 from pathlib import Path
-
 import pandas as pd
 import numpy as np
 import torch
 import torchaudio
 from librosa import power_to_db
-from sklearn import cluster, datasets, mixture, decomposition, discriminant_analysis, naive_bayes, svm, tree, ensemble
+from sklearn import cluster, manifold, mixture, decomposition, discriminant_analysis, naive_bayes, svm, tree, ensemble
+from sklearn import datasets
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, confusion_matrix, adjusted_mutual_info_score, mutual_info_score, \
     silhouette_score
 from sklearn.metrics.cluster import contingency_matrix
 from sklearn.utils.class_weight import compute_class_weight, compute_sample_weight
 from sklearn.neighbors import kneighbors_graph
+from sklearn.preprocessing import StandardScaler
+#import umap
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 # from mpl_toolkits.mplot3d import Axes3D
@@ -21,11 +23,16 @@ from itertools import chain
 from functools import partial
 from textwrap import indent
 
-from convert_labels import acr_dir
 from features import load_acramos_slices, train_test_split_dataset, prevalence, unchain, file_classification_report, \
-    slice_classification_report, agg_classification_report, conv_slice2file
+    slice_classification_report, agg_classification_report, conv_slice2file, acr_dirs
+from cv_acramos import models_fit_evaluate
 from TrainSamples import plot_spectrogram
 from TrainSoundExploration import plot_normal_prominent
+
+#from convert_labels import acr_dir
+#acr_dir = r"D:\ADSIM\Import-2023-04"
+#acr_dir = Path.home() / 'prj' / 'acrDb'
+acr_dir = acr_dirs['V1']
 
 
 # quietschen simulation
@@ -111,6 +118,11 @@ def plot_recording_trajectories(Xr: list, y=(), record_label=(), ax=None, projec
     return
 
 
+def scatter(X, y, ax, labels=(), **kwargs):
+    for i, k in enumerate(np.unique(y)):
+        ax.scatter(*X[k == y].T, label=labels[i] if any(labels) else None, **kwargs)
+
+
 # link 3d axis view
 def link_elev_azim(fig, axs):
     def on_move(event):
@@ -145,13 +157,15 @@ def link_elev_azim(fig, axs):
 if __name__ == "__main__":
     matplotlib.use('TkAgg')
     pd.options.display.float_format = '{:,.2f}'.format
-    cluster_methods = ["kmeans", "ac ward", "ac single", "ac average"]
-    cluster_method = cluster_methods[0]
+    cluster_methods = ["kmeans", "ac ward", "ac single", "ac average", "hdbscan"]
+    cluster_method = cluster_methods[-1]
     data_selection = ["iris", "acramos", "simulation"][1]
     holdout = True
     relabel_clusters = False
     do_plot_spectra = False
     do_plot_training_errs_spectrograms = False
+    do_plot_spaces = True
+    nc_dimred = 64
     projection = None
     projection = '3d'
     spectral_pool = 0  # kernel for spectral pooling
@@ -160,22 +174,28 @@ if __name__ == "__main__":
     len_files_ho = len_files = None
     if data_selection == "acramos":
         # use uniform subset
-        subset = ["[Negativ]", "[Quietschen]"]
-        subset = ["[Quietschen]"]
-        # subset = ["[Kreischen]", "[Quietschen]"]
-        # classes = [label.index("[Kreischen]"), label.index("[Quietschen]"), label.index("[Kreischen][Quietschen]")]
-        # classes = [label.index("[Kreischen]"), label.index("[Kreischen][Quietschen]")]
-        # classes = [label.index("[Kreischen][Quietschen]")]
+        subset = ["Negativ", "Quietschen"]
+        subset = ["Quietschen"]
+        #subset = ["Kreischen"]
+        #subset = ["Kreischen", "Quietschen"]
+        #subset = ["Negativ", "Kreischen", "Quietschen"]
+        #subset = ["Negativ", "Quietschen", "Kreischen,Quietschen"]
+        #subset = ["Negativ", "Kreischen", "Quietschen", "Kreischen,Quietschen"]
+        # classes = [label.index("Kreischen"), label.index("Quietschen"), label.index("Kreischen,Quietschen")]
+        # classes = [label.index("Kreischen"), label.index("Kreischen,Quietschen")]
+        # classes = [label.index("Kreischen,Quietschen")]
         reindex = True
-        ds = load_acramos_slices(subset=subset, n=100,
+        ds = load_acramos_slices(subset=subset, label_subset=["Kreischen", "Quietschen"], #n=100,
+                                 multiclass=True,
                                  reindex=reindex, label_report=True,
-                                 dir=acr_dir, split=1.0, aggregate=lambda x: x, spectral_pool=0,
+                                 dir=acr_dir, split=1.0, aggregate=np.mean, spectral_pool=0,
                                  # feat_cache="clustering")
-                                 feat_cache=Path(__file__).stem)
+                                 feat_cache=Path(acr_dir) / f"{Path(__file__).stem}_slices")
         # labels = np.unique([*chain(*ds['y'])])
         label = np.array(ds['target_names'])
 
         print("")
+        print(f"Flattening {len(ds['X'])} files to {sum(len(v) for v in ds['X'])} slices")
         if holdout:
             ds_trn, ds_ho = train_test_split_dataset(ds)
             len_files_ho = list(map(len, ds_ho['y']))
@@ -241,35 +261,53 @@ if __name__ == "__main__":
     prev.columns = [v[-1] for v in prev.columns]
     print(prev.to_string(col_space=[7] * len(prev.columns)), '\n')
 
+    nc_dimred = min(len(X[0]), nc_dimred)
     cluster_params = dict(
         n_clusters=max(2, len(np.unique(y))),
         n_neighbors=3,
     )
 
     if cluster_params["n_clusters"] > 1:
+        nc_cluster_dimred = nc_dimred
+
+        Xc = decomposition.PCA(n_components=nc_cluster_dimred).fit_transform(X)
+        Xc = StandardScaler().fit_transform(Xc)
         print(f"Clustering validation")
         # DB validation
         # https://stats.stackexchange.com/questions/448988/which-metrics-are-suitable-for-density-based-clustering-validation
+        yc = y
         if cluster_method.startswith("ac"):
             linkage = cluster_method.split(" ")[1]
             # connectivity matrix for structured Ward
-            connectivity = kneighbors_graph(X, n_neighbors=cluster_params["n_neighbors"], include_self=False)
+            connectivity = kneighbors_graph(Xc, n_neighbors=cluster_params["n_neighbors"], include_self=False)
             ac = cluster.AgglomerativeClustering(n_clusters=cluster_params["n_clusters"],
                                                  linkage=linkage,
                                                  affinity="euclidean",
                                                  connectivity=connectivity,
                                                  )
-            ac.fit(decomposition.PCA().fit_transform(X))
+            ac.fit(Xc)
             y_pred = ac.labels_.astype(int)
-        elif cluster_method.startswith("kmeans"):
-            km = cluster.KMeans(n_clusters=cluster_params["n_clusters"])
-            km.fit(decomposition.PCA().fit_transform(X))
+        elif cluster_method == ("kmeans"):
+            km = cluster.KMeans(n_clusters=cluster_params["n_clusters"], n_init=10)
+            km.fit(Xc)
             y_pred = km.labels_.astype(int)
+        elif cluster_method == "hdbscan":
+            dbscan = cluster.HDBSCAN(min_cluster_size=6, min_samples=7).fit(Xc)
+            y_pred = dbscan.labels_[dbscan.labels_ >= 0]
+            yc = y[dbscan.labels_ >= 0]
+
+            # Number of clusters in labels, ignoring noise if present.
+            n_clusters_ = len(set(y_pred))
+            n_noise_ = sum(dbscan.labels_ < 0)
+
+            print("Estimated number of clusters: %d" % n_clusters_)
+            print("Estimated number of noise points: %d" % n_noise_)
+            Xc = Xc[dbscan.labels_ >= 0]
         else:
             raise ValueError("unknown cluster method")
-        cs = pd.DataFrame({("external", "ami"): [adjusted_mutual_info_score(y, y_pred)],
-                           ("external", "s_y"): [silhouette_score(X, labels=y)] if len(set(y)) > 1 else np.NaN,
-                           ("internal", "s_yh"): [silhouette_score(X, labels=y_pred)], },
+        cs = pd.DataFrame({("external", "ami"): [adjusted_mutual_info_score(yc, y_pred)],
+                           ("external", "s_y"): [silhouette_score(Xc, labels=yc)] if len(set(y)) > 1 else np.NaN,
+                           ("internal", "s_yh"): [silhouette_score(Xc, labels=y_pred)], },
                           index=[cluster_method])
         # cs.index.name = "clusterer"
         # using plural for multiindex required
@@ -290,11 +328,17 @@ if __name__ == "__main__":
         # plt.legend(["MI", "AMI"])
 
         print("Contingency matrix")
-        cm = contingency_matrix(y, labels_pred=y_pred)  # confusion_matrix(y, y_pred=y_pred)
-        print(pd.DataFrame(cm, index=pd.Series(label),  # name="true"),
+        cm = contingency_matrix(yc, labels_pred=y_pred)  # confusion_matrix(y, y_pred=y_pred)
+        print(pd.DataFrame(cm, index=np.array(label)[np.unique(y)],  # name="true"),
                            columns=pd.Series(np.unique(y_pred), name=r"true\clusters")))
         print()
+        # for later plots
+        if cluster_method == "hdbscan":
+            y_pred = dbscan.labels_
         if relabel_clusters:
+            # this code attempted to assign the best fitting label, regarding ground truth, to clusters for performance
+            # metrics computation.
+            # However, this can be tricky and was skipped in favor of dedicated clustering metrics, e.g. AMI.
             raise NotImplementedError
             # process in order of the largest recalls first
             rcm = cm / cm.sum(axis=1)[:, None]
@@ -313,67 +357,57 @@ if __name__ == "__main__":
     # PCA
     n_components = 3
     pca = decomposition.PCA(n_components=n_components).fit(X)
-    lda = discriminant_analysis.LinearDiscriminantAnalysis(n_components=min(n_components, len(np.unique(y)) - 1)).fit(X,
-                                                                                                                      y)
     Xp = pca.transform(X)
+
+    lda = discriminant_analysis.LinearDiscriminantAnalysis(n_components=min(n_components, len(np.unique(y)) - 1))
+    lda = lda.fit(X, y)
     Xl = lda.transform(X)
     if Xl.shape[1] < 3:
+        # add dimensions to avoid all points on a line, which would be too dense
         if True:
             # complete orthonormal basis
             scalings = np.linalg.svd(lda.scalings_)[0][:, lda.scalings_.shape[1]:]
             #scalings = scalings[:, np.argsort(np.max(scalings, axis=0))[10:-1:50]]
-            assert np.allclose(lda.scalings_.T@scalings, 0), "orthonormal base extension failed"
+            # LDA components are not orthogonal:
+            # https://stats.stackexchange.com/questions/354847/why-are-the-discriminant-axes-in-linear-discriminant-analysis-lda-not-orthogon
+            # assert np.allclose(lda.scalings_.T@scalings, 0), "orthonormal base extension failed"
             scalings = np.c_[lda.scalings_/np.linalg.norm(lda.scalings_), scalings]
             X_new = np.dot(X - lda.xbar_, lda.scalings_)
-            assert np.allclose(Xl, X_new)
+            #assert np.allclose(Xl, X_new)
             Xl = np.dot(X - lda.xbar_, scalings[:, :3])
         else:
             # random scatter for one missing dim
             Xl = np.concatenate((Xl, np.random.rand(len(Xl), 1), np.zeros((len(Xl), 2 - Xl.shape[1]))), axis=1)
-    Xr = dict(PCA=Xp, LDA=Xl)
+    t_sne = manifold.TSNE(
+        n_components=n_components,
+        perplexity=30,
+        init="random",
+        n_iter=1000,  #
+        random_state=0,
+    )
+    S_t_sne = t_sne.fit_transform(X)
+    Xr = dict(PCA=Xp, LDA=Xl, TSNE=S_t_sne)
+
     if holdout:
         print("Holdout test")
-        s = {}
-        for k, mdl in dict(LDA=discriminant_analysis.LinearDiscriminantAnalysis(priors=None),
-                           RF=ensemble.RandomForestClassifier()).items():
-            mdl = mdl.fit(X, y)
-            for ki, v in dict(test=(X_ho, y_ho, len_files_ho), train=(X, y, len_files), ).items():
-                yh = mdl.predict(v[0])
-                aggregate = dict(file=lambda x: x)
-                if len_files_ho:
-                    aggregate = dict(file=partial(conv_slice2file, split_sizes=v[2]), slice=lambda x: x)
-                for kii, f in aggregate.items():
-                    cr = agg_classification_report(v[1], y_pred=yh, aggregate=f, names=label, as_dataframe=True)
-                    s[(k, ki, kii)] = cr
-        # vertical join a Dataframe
-        s = pd.concat(s, axis=0)
-        # split by multiindex level to dict of frames
-        splitlevel = lambda x, level, axis: {k: v.droplevel(level, axis) for k, v in x.groupby(level=level, axis=axis)}
-        # move innermost index to top column hierarchy for wide format
-        s = pd.concat(splitlevel(s, -2, 0), axis=1)
-        # select scores
-        # s.reorder_levels(np.roll(range(4), 1)).loc["macro avg"]
-        # s.loc[(*[slice(None)]*3, 'macro avg')].droplevel(-1)
-        # dict(list(s.groupby(level=-1)))['macro avg'].droplevel(-1)
-        # s.groupby(level=-1).get_group('macro avg').droplevel(-1)
-        # s.loc[s.groupby(level=-1).groups['macro avg']].droplevel(-1)
-        # [s.reorder_levels(np.roll(range(3), 1)).loc[k] for k in dict.fromkeys([k[-1] for k in s.index])]
-        # s = splitlevel(s, -1, 0)['macro avg']
-        df = s.groupby(level=-1).get_group('macro avg').reorder_levels([2, 0, 1])
-        print(df.to_string(col_space=([*[8] * 4, 16] * 2)[:s.shape[1]], ))
-        print()
+        d = dict(LDA=discriminant_analysis.LinearDiscriminantAnalysis(priors=None),
+                 RF=ensemble.RandomForestClassifier(random_state=42))
+        s1 = models_fit_evaluate(d, X=X, y=y, X_ho=X_ho, y_ho=y_ho, shape=len_files, shape_ho=len_files_ho,
+                                 names=label, eval_on_trainset=True, print_score="macro avg")
+        # s2 = pd.concat({k: model_fit_evaluate(mdl, X=ds_trn['X'], y=ds_trn['y'], X_ho=ds_ho['X'], y_ho=ds_ho['y'],
+        #                                       target_names=label, eval_on_trainset=True) for k, mdl in d.items()})
 
         yh = lda.predict(X_ho)
         if do_plot_training_errs_spectrograms:
             plot_error_spectrograms(X_ho, y_ho, yh=yh, len_files=len_files_ho)
 
     plt.figure()
-    [plt.scatter(*Xl[y == k, :2].T, marker='o', s=10 ** 2, alpha=.3, label=label[k]) for k in np.unique(y)]
+    [plt.scatter(*Xl[y == k, :2].T, marker='o', s=4 ** 2, alpha=.5, label=label[k]) for k in np.unique(y)]
     yh = lda.predict(X)
     e = np.where(yh != y)[0]
     # yf, yhf = [np.array([any(v) * 1 for v in np.split(vs, np.cumsum(len_files)[:-1])]) for vs in [y, yh, ]]
     # ef = np.where(yhf != yf)[0]
-    plt.scatter(*Xl[e, :2].T, s=14 ** 2, color='r', facecolors='none', linewidths=2, label="error")
+    plt.scatter(*Xl[e, :2].T, s=8 ** 2, color='r', facecolors='none', linewidths=2, label="error")
     plt.legend()
     plt.title(f"LDA projection, n = {len(Xl)}")
 
@@ -383,13 +417,9 @@ if __name__ == "__main__":
         ixs = [(np.where(v > 0)[0][-1] + 1, v[v > 0][-1], k) for v, k in zip(np.c_[e] - np.cumsum(len_files), y[e])]
         ixs = list(zip(*zip(*ixs), Xl[e, 0]))
 
-    kdr = "LDA"
+    kdr = "TSNE"
     Xr = Xr[kdr]
-    if True:
-        def scatter(X, y, ax, labels=(), **kwargs):
-            for i, k in enumerate(np.unique(y)):
-                ax.scatter(*X[k == y].T, label=labels[i] if any(labels) else None, **kwargs)
-
+    if do_plot_spaces:
         # set up a figure twice as wide as it is tall
         r, c, fig = 1, 2, plt.figure(figsize=plt.figaspect(0.5))
         axs, ax = [], None
@@ -415,6 +445,7 @@ if __name__ == "__main__":
             # file-wise plot (3D / 2D)
             plot_recording_trajectories(*[unchain(v, len_files) for v in [Xr, y]],
                                         record_label=files, projection=projection)
+            plt.title(f"{len(len_files)} recording trajectories")
             #plt.legend()
             #plt.legend([])
 

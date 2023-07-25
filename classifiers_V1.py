@@ -1,3 +1,4 @@
+# legacy code, file renamed to *_V1 to differentiate from newer code (V2)
 from pathlib import Path
 
 import pandas as pd

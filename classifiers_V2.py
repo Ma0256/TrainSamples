@@ -495,7 +495,9 @@ if __name__ == "__main__":
             columns=["proc_slices", "agg_slices", "to_binary_for"])
         # reorder columns
         data_KQ = data_KQ[data_KQ.columns[np.roll(np.arange(data_KQ.shape[1]), 1)]]
-        data_KQ = pd.DataFrame(dict(acramos=["V1", "V2"])).merge(data_KQ, how="cross")
+        data_KQ = pd.DataFrame(dict(acramos=["V1",
+                                             #"V2"
+                                             ])).merge(data_KQ, how="cross")
 
         settings = data_slices
         #settings = data_K

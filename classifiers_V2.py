@@ -502,7 +502,9 @@ if __name__ == "__main__":
         settings = data_KQ
 
         # settings = settings.merge(pd.DataFrame(dict(scale=["std"])), how="cross")
-        settings = settings.merge(pd.DataFrame(dict(model=["LDA", "SVC", "RF"])), how="cross")
+        settings = settings.merge(#pd.DataFrame(dict(model=["LDA", "SVC", "RF"])),
+                                  pd.DataFrame(dict(model=["LDA"])),
+                                  how="cross")
     elif label_subset == ["Flachstelle"]:
         load_acramos_params = dict(dir=acramos, label_subset=label_subset, multiclass=True, split=1.0, )
         settings = pd.DataFrame(dict(acramos=["V2"])).merge(pd.DataFrame(dict(model=list(models))), how="cross")
